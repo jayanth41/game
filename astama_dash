@@ -1,0 +1,127 @@
+import streamlit as st
+import numpy as np
+import sounddevice as sd
+import librosa
+import librosa.display
+import joblib
+import time
+import matplotlib.pyplot as plt
+from scipy.io.wavfile import write
+
+# --- 1. Settings & Model Loading ---
+st.set_page_config(page_title="Asthma Detection", layout="wide")
+
+@st.cache_resource
+def load_model():
+    return joblib.load("asthama_model.pkl")
+
+model = load_model()
+
+labels = ["Normal Breathing", "Mild Asthma", "Severe Asthma"]
+# Streamlit uses specific status colors instead of raw color names for metrics
+colors = ["normal", "off", "inverse"] 
+
+fs = 4000
+duration = 30
+
+# --- 2. Feature Extraction (Kept exactly as your original) ---
+def extract_features(file):
+    y, sr = librosa.load(file, sr=4000)
+
+    mfcc = np.mean(librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13), axis=1)
+    spectral_centroid = np.mean(librosa.feature.spectral_centroid(y=y, sr=sr))
+    spectral_rolloff = np.mean(librosa.feature.spectral_rolloff(y=y, sr=sr))
+    zcr = np.mean(librosa.feature.zero_crossing_rate(y))
+
+    features = np.hstack([mfcc, spectral_centroid, spectral_rolloff, zcr])
+    return features
+
+# --- 3. Dashboard UI ---
+st.title("🫁 Digital Stethoscope & Asthma Dashboard")
+st.markdown("Live signal processing and Random Forest AI detection.")
+
+st.sidebar.header("Controls")
+st.sidebar.write(f"**Sample Rate:** {fs} Hz")
+st.sidebar.write(f"**Record Time:** {duration} seconds")
+
+# --- 4. The Main Execution Logic ---
+if st.sidebar.button("🎙️ Start Live Detection", type="primary"):
+    
+    # Create a placeholder on the screen to show the live timer
+    status_text = st.empty()
+    progress_bar = st.progress(0)
+    
+    status_text.info("Recording live audio from stethoscope...")
+    
+    # Record audio via the Pi's microphone
+    audio = sd.rec(int(duration * fs), samplerate=fs, channels=1)
+    
+    # Live countdown timer on the dashboard
+    for i in range(duration):
+        time.sleep(1)
+        progress_bar.progress((i + 1) / duration)
+        status_text.info(f"Recording... {duration - (i+1)} seconds remaining")
+        
+    sd.wait() # Wait until recording is completely finished
+    status_text.warning("Processing Signal & Extracting Features...")
+    
+    # Save the file temporarily
+    file_name = "lung_sound_temp.wav"
+    write(file_name, fs, audio)
+    
+    # Extract features and Predict
+    features = extract_features(file_name)
+    features_reshaped = features.reshape(1, -1)
+    prediction = model.predict(features_reshaped)[0]
+    
+    result_text = labels[prediction]
+    
+    status_text.empty() # Clear the processing text
+    progress_bar.empty() # Clear the progress bar
+    
+    # --- 5. Display the Results in a Clean Layout ---
+    st.divider()
+    
+    # Top Row: Prediction Result
+    st.subheader("Diagnostic Result")
+    if prediction == 0:
+        st.success(f"✅ {result_text}")
+    elif prediction == 1:
+        st.warning(f"⚠️ {result_text}")
+    else:
+        st.error(f"🚨 {result_text}")
+        
+    # Middle Row: Data Values
+    st.markdown("### Raw Extracted Features")
+    col1, col2, col3 = st.columns(3)
+    col1.metric(label="Spectral Centroid", value=f"{features[13]:.2f}")
+    col2.metric(label="Spectral Rolloff", value=f"{features[14]:.2f}")
+    col3.metric(label="Zero Crossing Rate", value=f"{features[15]:.4f}")
+    
+    # Bottom Row: Waveforms and Spectrograms
+    st.divider()
+    st.subheader("Signal Visualization")
+    
+    # Load the audio for plotting
+    y, sr = librosa.load(file_name, sr=fs)
+    
+    graph_col1, graph_col2 = st.columns(2)
+    
+    with graph_col1:
+        st.markdown("**Audio Amplitude Waveform**")
+        fig1, ax1 = plt.subplots(figsize=(6, 3))
+        librosa.display.waveshow(y, sr=sr, ax=ax1, color="blue")
+        ax1.set_xlabel("Time (s)")
+        ax1.set_ylabel("Amplitude")
+        st.pyplot(fig1)
+        
+    with graph_col2:
+        st.markdown("**Mel-Spectrogram**")
+        fig2, ax2 = plt.subplots(figsize=(6, 3))
+        S = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=128)
+        S_dB = librosa.power_to_db(S, ref=np.max)
+        img = librosa.display.specshow(S_dB, x_axis='time', y_axis='mel', sr=sr, ax=ax2)
+        fig2.colorbar(img, ax=ax2, format='%+2.0f dB')
+        st.pyplot(fig2)
+        
+    st.sidebar.audio(file_name, format="audio/wav")
